@@ -1,8 +1,8 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import axios from 'axios';
 import CodeMirror from '@uiw/react-codemirror';
 import { yaml } from '@codemirror/lang-yaml';
-import { Play, Loader2, Database, FileJson, FileText, Clock, AlertCircle, Settings, X, CheckCircle2, Download, Eraser } from 'lucide-react';
+import { Play, Loader2, Database, FileJson, FileText, Clock, AlertCircle, Settings, X, CheckCircle2, Download, Eraser, ShieldCheck, AlertTriangle, Info, ChevronDown, ChevronUp } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const API_BASE = 'http://localhost:8000';
@@ -31,6 +31,21 @@ file_sources: []
 api_dumps: []
 `;
 
+interface ValidationIssue {
+    path: string;
+    message: string;
+}
+
+interface ValidationResult {
+    valid: boolean;
+    errors: ValidationIssue[];
+    warnings: ValidationIssue[];
+    summary: {
+        entity_count: number;
+        column_count: number;
+    };
+}
+
 export default function App() {
     const [schemaText, setSchemaText] = useState(DEFAULT_SCHEMA);
     const [status, setStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
@@ -43,6 +58,11 @@ export default function App() {
     const [connectionString, setConnectionString] = useState('');
     const [testDbStatus, setTestDbStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
     const [testDbMessage, setTestDbMessage] = useState('');
+
+    // Validation State
+    const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+    const [isValidating, setIsValidating] = useState(false);
+    const [showValidationDetails, setShowValidationDetails] = useState(true);
 
     const pollStatus = useCallback(async (currentJobId: string) => {
         try {
@@ -98,7 +118,42 @@ export default function App() {
         document.body.removeChild(a);
     };
 
+    const handleValidate = async (): Promise<ValidationResult | null> => {
+        try {
+            setIsValidating(true);
+            setValidationResult(null);
+
+            const res = await axios.post(`${API_BASE}/validate`, {
+                schema: schemaText,
+            });
+            const vr: ValidationResult = res.data;
+            setValidationResult(vr);
+            setShowValidationDetails(true);
+            return vr;
+        } catch (err: any) {
+            const errorResult: ValidationResult = {
+                valid: false,
+                errors: [{ path: '(request)', message: err.response?.data?.detail || err.message }],
+                warnings: [],
+                summary: { entity_count: 0, column_count: 0 },
+            };
+            setValidationResult(errorResult);
+            setShowValidationDetails(true);
+            return errorResult;
+        } finally {
+            setIsValidating(false);
+        }
+    };
+
     const handleMockMe = async () => {
+        // Step 1: Validate first
+        const vr = await handleValidate();
+        if (!vr || !vr.valid) {
+            // Don't proceed if validation failed
+            return;
+        }
+
+        // Step 2: Generate
         try {
             setStatus('running');
             setError(null);
@@ -122,6 +177,19 @@ export default function App() {
         }
     };
 
+    const handleValidateOnly = async () => {
+        await handleValidate();
+    };
+
+    // Clear validation when schema text changes
+    const handleSchemaChange = (val: string) => {
+        setSchemaText(val);
+        // Clear stale validation results when schema changes
+        if (validationResult) {
+            setValidationResult(null);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-6 md:p-12">
             <div className="max-w-6xl mx-auto space-y-8">
@@ -134,7 +202,7 @@ export default function App() {
                             Schema-driven realistic mock data generation at scale.
                         </p>
                     </div>
-                    <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-3">
                         <button
                             onClick={() => setIsSettingsOpen(true)}
                             className="flex items-center text-slate-600 hover:text-slate-900 transition-colors px-4 py-2 rounded-lg hover:bg-slate-100 font-medium"
@@ -143,8 +211,20 @@ export default function App() {
                             DB Settings
                         </button>
                         <button
+                            onClick={handleValidateOnly}
+                            disabled={isValidating || status === 'running'}
+                            className="group relative inline-flex items-center justify-center px-6 py-3 font-bold text-emerald-700 transition-all duration-200 bg-emerald-50 rounded-xl hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 disabled:opacity-70 disabled:cursor-not-allowed border border-emerald-200 hover:border-emerald-300"
+                        >
+                            {isValidating ? (
+                                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                            ) : (
+                                <ShieldCheck className="w-5 h-5 mr-2 group-hover:scale-110 transition-transform" />
+                            )}
+                            {isValidating ? 'Checking...' : 'Validate'}
+                        </button>
+                        <button
                             onClick={handleMockMe}
-                            disabled={status === 'running'}
+                            disabled={status === 'running' || isValidating}
                             className="group relative inline-flex items-center justify-center px-8 py-3 font-bold text-white transition-all duration-200 bg-violet-600 font-pj rounded-xl hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-600 disabled:opacity-70 disabled:cursor-not-allowed"
                         >
                             {status === 'running' ? (
@@ -241,6 +321,142 @@ export default function App() {
                     </div>
                 )}
 
+                {/* Validation Results Banner */}
+                <AnimatePresence>
+                    {validationResult && (
+                        <motion.div
+                            initial={{ opacity: 0, y: -12 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -12 }}
+                            transition={{ duration: 0.25 }}
+                        >
+                            {validationResult.valid ? (
+                                /* ── SUCCESS BANNER ── */
+                                <div className="rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 via-green-50 to-teal-50 shadow-sm overflow-hidden">
+                                    <div className="px-6 py-4 flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-emerald-100">
+                                                <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-emerald-800 text-base">Schema Valid — Ready to Generate</h3>
+                                                <p className="text-sm text-emerald-600 mt-0.5">
+                                                    {validationResult.summary.entity_count} {validationResult.summary.entity_count === 1 ? 'entity' : 'entities'} · {validationResult.summary.column_count} {validationResult.summary.column_count === 1 ? 'column' : 'columns'}
+                                                    {validationResult.warnings.length > 0 && ` · ${validationResult.warnings.length} ${validationResult.warnings.length === 1 ? 'warning' : 'warnings'}`}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {validationResult.warnings.length > 0 && (
+                                                <button
+                                                    onClick={() => setShowValidationDetails(!showValidationDetails)}
+                                                    className="flex items-center gap-1 text-sm font-medium text-emerald-600 hover:text-emerald-800 transition-colors px-3 py-1.5 rounded-lg hover:bg-emerald-100"
+                                                >
+                                                    {showValidationDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                    {showValidationDetails ? 'Hide' : 'Show'} Warnings
+                                                </button>
+                                            )}
+                                            <button onClick={() => setValidationResult(null)} className="p-1.5 rounded-lg text-emerald-400 hover:text-emerald-600 hover:bg-emerald-100 transition-colors">
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {/* Warnings List */}
+                                    <AnimatePresence>
+                                        {showValidationDetails && validationResult.warnings.length > 0 && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                transition={{ duration: 0.2 }}
+                                                className="overflow-hidden"
+                                            >
+                                                <div className="px-6 pb-4 space-y-2">
+                                                    <div className="border-t border-emerald-200 pt-3" />
+                                                    {validationResult.warnings.map((w, i) => (
+                                                        <div key={i} className="flex items-start gap-2.5 text-sm pl-1">
+                                                            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                                            <div>
+                                                                <code className="text-xs font-mono bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">{w.path}</code>
+                                                                <span className="text-slate-600 ml-2">{w.message}</span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
+                            ) : (
+                                /* ── ERROR BANNER ── */
+                                <div className="rounded-2xl border border-red-200 bg-gradient-to-r from-red-50 via-rose-50 to-pink-50 shadow-sm overflow-hidden">
+                                    <div className="px-6 py-4 flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-red-100">
+                                                <AlertCircle className="w-6 h-6 text-red-600" />
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-red-800 text-base">Schema Has Issues — Please Fix Before Generating</h3>
+                                                <p className="text-sm text-red-600 mt-0.5">
+                                                    {validationResult.errors.length} {validationResult.errors.length === 1 ? 'error' : 'errors'}
+                                                    {validationResult.warnings.length > 0 && ` · ${validationResult.warnings.length} ${validationResult.warnings.length === 1 ? 'warning' : 'warnings'}`}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => setShowValidationDetails(!showValidationDetails)}
+                                                className="flex items-center gap-1 text-sm font-medium text-red-600 hover:text-red-800 transition-colors px-3 py-1.5 rounded-lg hover:bg-red-100"
+                                            >
+                                                {showValidationDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                {showValidationDetails ? 'Hide' : 'Show'} Details
+                                            </button>
+                                            <button onClick={() => setValidationResult(null)} className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-100 transition-colors">
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <AnimatePresence>
+                                        {showValidationDetails && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                transition={{ duration: 0.2 }}
+                                                className="overflow-hidden"
+                                            >
+                                                <div className="px-6 pb-4 space-y-2 max-h-72 overflow-y-auto">
+                                                    <div className="border-t border-red-200 pt-3" />
+                                                    {/* Errors */}
+                                                    {validationResult.errors.map((e, i) => (
+                                                        <div key={`err-${i}`} className="flex items-start gap-2.5 text-sm pl-1">
+                                                            <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                                                            <div>
+                                                                <code className="text-xs font-mono bg-red-100 text-red-700 px-1.5 py-0.5 rounded">{e.path}</code>
+                                                                <span className="text-slate-700 ml-2">{e.message}</span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                    {/* Warnings */}
+                                                    {validationResult.warnings.map((w, i) => (
+                                                        <div key={`warn-${i}`} className="flex items-start gap-2.5 text-sm pl-1">
+                                                            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                                            <div>
+                                                                <code className="text-xs font-mono bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">{w.path}</code>
+                                                                <span className="text-slate-600 ml-2">{w.message}</span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
+                            )}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 <main className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <section className="flex flex-col h-[700px]">
                         <div className="flex items-center justify-between mb-4">
@@ -262,7 +478,7 @@ export default function App() {
                                 value={schemaText}
                                 height="100%"
                                 extensions={[yaml()]}
-                                onChange={(val) => setSchemaText(val)}
+                                onChange={handleSchemaChange}
                                 className="h-full text-base"
                                 theme="light"
                             />
@@ -286,7 +502,11 @@ export default function App() {
                                     >
                                         <FileText className="w-16 h-16 mb-4 opacity-50" />
                                         <p className="text-lg">Ready to generate data.</p>
-                                        <p className="text-sm">Click "Mock Me" to begin.</p>
+                                        <p className="text-sm mt-1">Click <strong>"Validate"</strong> to check your schema, or <strong>"Mock Me"</strong> to generate.</p>
+                                        <div className="mt-6 flex items-start gap-2 px-6 py-3 bg-slate-50 rounded-xl border border-slate-100 text-sm text-slate-500 max-w-sm">
+                                            <Info className="w-4 h-4 mt-0.5 shrink-0 text-violet-400" />
+                                            <span>"Mock Me" will automatically validate your schema first. If errors are found, generation will be blocked.</span>
+                                        </div>
                                     </motion.div>
                                 )}
 

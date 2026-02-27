@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from job_manager import start_job, get_job_status, get_job_result
 from schema_adapter import adapt_schema
+from schema_validator import validate_schema
 
 BACKEND_DIR = Path(__file__).parent.resolve()
 
@@ -21,6 +22,43 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.post("/validate")
+async def validate_yaml(request: Request):
+    """Validate a YAML schema without running the generator."""
+    try:
+        body_bytes = await request.body()
+        body_dict = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    schema_str = body_dict.get("schema")
+    if not schema_str:
+        raise HTTPException(status_code=400, detail="Missing 'schema' in payload")
+
+    try:
+        schema_dict = yaml.safe_load(schema_str)
+    except yaml.YAMLError as e:
+        # Return YAML parse errors in a structured way
+        error_msg = str(e)
+        return {
+            "valid": False,
+            "errors": [{"path": "(yaml syntax)", "message": f"YAML parse error: {error_msg}"}],
+            "warnings": [],
+            "summary": {"entity_count": 0, "column_count": 0},
+        }
+
+    if not isinstance(schema_dict, dict):
+        return {
+            "valid": False,
+            "errors": [{"path": "(root)", "message": "YAML must parse to a mapping/object, not a scalar or list."}],
+            "warnings": [],
+            "summary": {"entity_count": 0, "column_count": 0},
+        }
+
+    result = validate_schema(schema_dict)
+    return result
+
 
 @app.post("/generate")
 async def generate_data(request: Request):
