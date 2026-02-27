@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@codemirror/lang-yaml": "^6.1.2",
+    "@uiw/react-codemirror": "^4.25.5",
+    "axios": "^1.13.5",
+    "framer-motion": "^12.34.3",
+    "lucide-react": "^0.575.0"
+  }
+}
