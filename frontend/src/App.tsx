@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import CodeMirror from '@uiw/react-codemirror';
 import { yaml } from '@codemirror/lang-yaml';
-import { Play, Loader2, Database, FileJson, FileText, Clock, AlertCircle, Settings, X, CheckCircle2, Download } from 'lucide-react';
+import { Play, Loader2, Database, FileJson, FileText, Clock, AlertCircle, Settings, X, CheckCircle2, Download, Eraser } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const API_BASE = 'http://localhost:8000';
@@ -243,10 +243,20 @@ export default function App() {
 
                 <main className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <section className="flex flex-col h-[700px]">
-                        <h2 className="text-xl font-bold mb-4 flex items-center text-slate-800">
-                            <FileJson className="w-5 h-5 mr-2 text-violet-500" />
-                            YAML Schema
-                        </h2>
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-xl font-bold flex items-center text-slate-800">
+                                <FileJson className="w-5 h-5 mr-2 text-violet-500" />
+                                YAML Schema
+                            </h2>
+                            <button
+                                onClick={() => setSchemaText('')}
+                                title="Clear all YAML content"
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-red-600 bg-red-50 rounded-lg hover:bg-red-100 hover:text-red-700 transition-all duration-200 border border-red-200 hover:shadow-sm active:scale-95"
+                            >
+                                <Eraser className="w-4 h-4" />
+                                Clear YAML
+                            </button>
+                        </div>
                         <div className="flex-1 overflow-hidden rounded-2xl border border-slate-200 shadow-sm bg-white">
                             <CodeMirror
                                 value={schemaText}

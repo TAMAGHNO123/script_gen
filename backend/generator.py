@@ -54,6 +54,12 @@ def _make_pool(fake: Faker, col_type: str, col_def: Dict, n_pool: int = POOL_SIZ
         return np.array([fake.phone_number() for _ in range(n_pool)], dtype=object)
     elif ct == "address":
         return np.array([fake.address().replace("\n", ", ") for _ in range(n_pool)], dtype=object)
+    elif ct == "job_title":
+        return np.array([fake.job() for _ in range(n_pool)], dtype=object)
+    elif ct == "state":
+        return np.array([fake.state_abbr() for _ in range(n_pool)], dtype=object)
+    elif ct == "ipv4":
+        return np.array([fake.ipv4() for _ in range(n_pool)], dtype=object)
     elif ct == "country":
         return np.array([fake.country() for _ in range(n_pool)], dtype=object)
     elif ct == "city":
@@ -366,6 +372,9 @@ class DataGenerator:
             "city":       "TEXT",
             "text":       "TEXT",
             "product_name": "TEXT",
+            "job_title":  "TEXT",
+            "state":      "TEXT",
+            "ipv4":       "TEXT",
             "choice":     "TEXT",
             "boolean":    "BOOLEAN",
             "integer":    "INTEGER",

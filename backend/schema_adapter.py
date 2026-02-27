@@ -195,6 +195,8 @@ def _adapt_column(c: Dict) -> Dict:
         "int":      "integer",
         "bigint":   "integer",
         "smallint": "integer",
+        "bigserial": "integer",
+        "serial":   "integer",
         "varchar":  "string",
         "text":     "string",
         "char":     "string",
@@ -202,6 +204,11 @@ def _adapt_column(c: Dict) -> Dict:
         "bool":     "boolean",
         "datetime": "timestamp",
         "person":   "name",
+        "full_name": "name",
+        "job_title": "job_title",
+        "state":    "state",
+        "ipv4":     "ipv4",
+        "ip":       "ipv4",
     }
     out["type"] = type_map.get(raw_type, raw_type)
 
