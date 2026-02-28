@@ -12,6 +12,18 @@ from schema_validator import validate_schema
 
 BACKEND_DIR = Path(__file__).parent.resolve()
 
+def _resolve_output_dir(job_id: str) -> Path:
+    """Return the effective output directory for a job.
+    
+    Incremental jobs store their output in the base job's directory.
+    The job_manager stores the effective 'output_dir' key when the job completes.
+    """
+    job_data = get_job_result(job_id)
+    stored = job_data.get("output_dir")
+    if stored:
+        return BACKEND_DIR / stored
+    return BACKEND_DIR / f"output_{job_id}"
+
 app = FastAPI(title="Data Generator Platform API")
 
 # Allow CORS for local dev
@@ -90,6 +102,56 @@ async def generate_data(request: Request):
 
     job_id = start_job(schema_dict, connection_string)
     return {"job_id": job_id, "status": "pending"}
+
+
+@app.post("/generate-incremental")
+async def generate_incremental(request: Request):
+    """Generate incremental data and append to an existing job's output."""
+    try:
+        body_bytes = await request.body()
+        body_dict = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    schema_str = body_dict.get("schema")
+    connection_string = body_dict.get("connection_string")
+    base_job_id = body_dict.get("base_job_id")
+    incremental_rows = body_dict.get("incremental_rows", 10)
+
+    if not schema_str:
+        raise HTTPException(status_code=400, detail="Missing 'schema' in payload")
+    if not base_job_id:
+        raise HTTPException(status_code=400, detail="Missing 'base_job_id' in payload")
+    if not isinstance(incremental_rows, int) or incremental_rows <= 0:
+        raise HTTPException(status_code=400, detail="'incremental_rows' must be a positive integer")
+
+    # Verify the base job exists and completed
+    base = get_job_result(base_job_id)
+    if base.get("error") == "Job not found":
+        raise HTTPException(status_code=404, detail="Base job not found")
+    if base.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Base job has not completed yet")
+
+    try:
+        schema_dict = yaml.safe_load(schema_str)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {str(e)}")
+
+    if not isinstance(schema_dict, dict):
+        raise HTTPException(status_code=400, detail="YAML must parse to an object/dict")
+
+    try:
+        schema_dict = adapt_schema(schema_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Schema adaptation error: {str(e)}")
+
+    job_id = start_job(
+        schema_dict, connection_string,
+        incremental=True,
+        incremental_rows=incremental_rows,
+        base_job_id=base_job_id,
+    )
+    return {"job_id": job_id, "base_job_id": base_job_id, "incremental_rows": incremental_rows, "status": "pending"}
 
 @app.post("/test-connection")
 async def test_connection(request: Request):
@@ -177,7 +239,7 @@ async def download_file(job_id: str = Query(...), path: str = Query(...)):
         raise HTTPException(status_code=404, detail="File not found")
 
     # Verify the file belongs to the given job's output directory
-    expected_prefix = BACKEND_DIR / f"output_{job_id}"
+    expected_prefix = _resolve_output_dir(job_id)
     try:
         target.relative_to(expected_prefix)
     except ValueError:
@@ -208,7 +270,7 @@ async def list_api_dumps(job_id: str):
     if res.get("status") != "completed":
         raise HTTPException(status_code=400, detail="Job not completed yet")
 
-    output_dir = BACKEND_DIR / f"output_{job_id}"
+    output_dir = _resolve_output_dir(job_id)
     if not output_dir.exists():
         raise HTTPException(status_code=404, detail="Output directory not found")
 
@@ -239,7 +301,7 @@ async def browse_api_data(job_id: str, api_name: str, page: int = Query(1, ge=1)
     if res.get("status") != "completed":
         raise HTTPException(status_code=400, detail="Job not completed yet")
 
-    api_dir = (BACKEND_DIR / f"output_{job_id}" / api_name).resolve()
+    api_dir = (_resolve_output_dir(job_id) / api_name).resolve()
     # Security: ensure path stays under backend dir
     try:
         api_dir.relative_to(BACKEND_DIR)

@@ -98,7 +98,8 @@ def _fill_pattern(pattern: str) -> str:
 # DataGenerator Class
 # ---------------------------------------------------------------------------
 class DataGenerator:
-    def __init__(self, schema: Dict, output_dir: str = "output", connection_string: Optional[str] = None):
+    def __init__(self, schema: Dict, output_dir: str = "output", connection_string: Optional[str] = None,
+                 incremental: bool = False, incremental_rows: int = 0):
         import importlib, sys, os as _os
         _backend_dir = _os.path.dirname(_os.path.abspath(__file__))
         if _backend_dir not in sys.path:
@@ -107,10 +108,14 @@ class DataGenerator:
         self.pg_conn_params = db_manager.get_db_connection_params(connection_string)
         self.schema = schema
         self.output_dir = Path(output_dir)
+        self.incremental = incremental
+        self.incremental_rows = incremental_rows
         self.start_time = time.time()
         self.summary: Dict[str, Any] = {
             "run_timestamp": datetime.now(timezone.utc).isoformat(),
             "schema_version": schema.get("version", "unknown"),
+            "incremental": incremental,
+            "incremental_rows": incremental_rows if incremental else 0,
             "database_tables": {},
             "files_generated": [],
             "api_dumps_generated": [],
@@ -408,6 +413,9 @@ class DataGenerator:
           • checkpoint_completion_target hint via work_mem
         For large tables the DataFrame is streamed in 200 k-row chunks so we
         never build a multi-GB in-memory CSV string.
+        
+        In incremental mode, the table is assumed to already exist and rows
+        are appended without re-creating the table.
         """
         if not PSYCOPG2_AVAILABLE:
             return 0
@@ -423,13 +431,14 @@ class DataGenerator:
             cur.execute("SET work_mem = '256MB';")
             conn.commit()
 
-            # ── create table ───────────────────────────────────────────────
-            create_sql = self._build_create_table_sql(entity_cfg)
-            cur.execute(create_sql)
-            conn.commit()
+            # ── create table (skip in incremental mode) ───────────────────
+            if not self.incremental:
+                create_sql = self._build_create_table_sql(entity_cfg)
+                cur.execute(create_sql)
+                conn.commit()
 
             cols        = list(df.columns)
-            quoted_cols = [f'"{c}"' for c in cols]
+            quoted_cols = [f'"{ c}"' for c in cols]
             cols_str    = ", ".join(quoted_cols)
             copy_sql    = f'COPY "{table}" ({cols_str}) FROM STDIN WITH CSV NULL AS \'\\N\''
 
@@ -450,7 +459,8 @@ class DataGenerator:
 
             cur.close()
             conn.close()
-            print(f"  ✓ {table}: {db_count:,} rows loaded")
+            mode_label = "appended (incremental)" if self.incremental else "loaded"
+            print(f"  ✓ {table}: {db_count:,} rows {mode_label}")
             return db_count
         except Exception as e:
             print(f"PostgreSQL load failed for '{table}': {e}")
@@ -527,7 +537,11 @@ class DataGenerator:
                             c = random.choice(date_cols)
                             fmt_str = random.choice(["%d/%m/%Y", "%m-%d-%Y", "%Y%m%d"])
                             df[c] = df[c].dt.strftime(fmt_str)
-                    df.to_csv(filepath, index=False, header=header)
+                    # Incremental: append to existing CSV
+                    if self.incremental and filepath.exists():
+                        df.to_csv(filepath, mode='a', index=False, header=False)
+                    else:
+                        df.to_csv(filepath, index=False, header=header)
                 elif fmt == "excel":
                     if not OPENPYXL_AVAILABLE: continue
                     if local_mess.get("summary_rows", False) and len(df) > 0:
@@ -538,6 +552,10 @@ class DataGenerator:
                             summary_row[df.columns[0]] = "Total"
                         df = pd.concat([df, pd.DataFrame([summary_row])], ignore_index=True)
                     sheet = file_cfg.get("sheet_name", "Sheet1")
+                    # Incremental: read existing Excel and append new rows
+                    if self.incremental and filepath.exists():
+                        existing_df = pd.read_excel(filepath, sheet_name=sheet, engine="openpyxl")
+                        df = pd.concat([existing_df, df], ignore_index=True)
                     if local_mess.get("multi_sheet_split", False) and len(df) > 2:
                         split_idx = len(df) // 2
                         df1 = df.iloc[:split_idx]
@@ -555,6 +573,11 @@ class DataGenerator:
                             drop_c = random.choice(drop_candidates)
                             if drop_c in df.columns:
                                 df = df.drop(columns=[drop_c])
+                    # Incremental: read existing parquet and append new rows
+                    if self.incremental and filepath.exists():
+                        existing_table = pq.read_table(str(filepath))
+                        existing_df = existing_table.to_pandas()
+                        df = pd.concat([existing_df, df], ignore_index=True)
                     table_pa = pa.Table.from_pandas(df, preserve_index=False)
                     pq.write_table(table_pa, str(filepath))
                 elif fmt == "json":
@@ -574,6 +597,12 @@ class DataGenerator:
                                 keys_to_del = [k for k, v in rec.items() if pd.isna(v) or v is None or v == "NaT"]
                                 for k in keys_to_del:
                                     rec.pop(k, None)
+                    # Incremental: read existing JSON array and extend
+                    if self.incremental and filepath.exists():
+                        with open(filepath, "r", encoding="utf-8") as fr:
+                            existing_records = json.load(fr)
+                        if isinstance(existing_records, list):
+                            records = existing_records + records
                     with open(filepath, "w", encoding="utf-8") as f:
                         json.dump(records, f, indent=2, default=str)
 
@@ -591,18 +620,32 @@ class DataGenerator:
         for api_cfg in self.schema.get("api_dumps", []):
             name       = api_cfg["name"]
             out_dir    = self.output_dir / api_cfg["output_dir"]
-            total      = api_cfg["total_records"]
+            new_count  = api_cfg["total_records"]
             page_size  = api_cfg["page_size"]
             pattern    = api_cfg["filename_pattern"]
-            n_pages    = math.ceil(total / page_size)
 
             start_dt, end_dt, temporal_cfg = self._temporal_config()
             global_mess = self.schema.get("global_messiness", {})
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            records_done = 0
-            for page in range(1, n_pages + 1):
-                n = min(page_size, total - records_done)
+            # ── Collect existing records when in incremental mode ──────────
+            existing_records: List[Dict[str, Any]] = []
+            if self.incremental:
+                page_num = 1
+                while True:
+                    existing_path = out_dir / pattern.format(page=page_num)
+                    if not existing_path.exists():
+                        break
+                    with open(existing_path, "r", encoding="utf-8") as fr:
+                        page_data = json.load(fr)
+                    existing_records.extend(page_data.get("data", []))
+                    page_num += 1
+
+            # ── Generate new records ───────────────────────────────────────
+            new_records: List[Dict[str, Any]] = []
+            gen_done = 0
+            while gen_done < new_count:
+                n = min(page_size, new_count - gen_done)
                 chunk_data = {}
                 for col_def in api_cfg["columns"]:
                     col_name = col_def["name"]
@@ -644,21 +687,28 @@ class DataGenerator:
                 for col in df.select_dtypes(include=['datetime64']).columns:
                     df[col] = df[col].astype(str)
 
-                payload = {
-                    "api":        name,
-                    "page":       page,
-                    "page_size":  page_size,
-                    "total_pages": n_pages,
-                    "total_records": total,
-                    "data":       df.to_dict(orient="records"),
-                }
+                new_records.extend(cast(List[Dict[str, Any]], df.to_dict(orient="records")))
+                gen_done += n
 
+            # ── Merge & re-paginate ────────────────────────────────────────
+            all_records = existing_records + new_records
+            total       = len(all_records)
+            n_pages     = max(1, math.ceil(total / page_size))
+
+            for page in range(1, n_pages + 1):
+                page_records = all_records[(page - 1) * page_size : page * page_size]
+                payload = {
+                    "api":           name,
+                    "page":          page,
+                    "page_size":     page_size,
+                    "total_pages":   n_pages,
+                    "total_records": total,
+                    "data":          page_records,
+                }
                 filename = pattern.format(page=page)
                 filepath = out_dir / filename
                 with open(filepath, "w", encoding="utf-8") as f:
                     json.dump(payload, f, default=str, indent=2)
-
-                records_done += n
 
             total_size_kb = float(sum(f.stat().st_size for f in out_dir.glob("*.json"))) / 1024.0
             self.summary["api_dumps_generated"].append({
@@ -711,6 +761,16 @@ class DataGenerator:
         fk_max_cache  = self.schema.get("fk_cache", {}).get("sample_size", 500_000)
 
         db_entities_cfg = self.schema.get("database", {}).get("entities", [])
+
+        # ── Incremental: override row counts ───────────────────────────────
+        if self.incremental and self.incremental_rows > 0:
+            for entity in db_entities_cfg:
+                entity["row_count"] = self.incremental_rows
+            for file_cfg in self.schema.get("file_sources", []):
+                file_cfg["rows_per_file"] = self.incremental_rows
+            for api_cfg in self.schema.get("api_dumps", []):
+                api_cfg["total_records"] = self.incremental_rows
+
         sorted_entities  = self._topological_sort(db_entities_cfg)
 
         fk_cache: Dict[str, np.ndarray] = {}
