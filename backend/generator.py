@@ -804,51 +804,52 @@ class DataGenerator:
             actual_rows = self.load_postgres(df, entity_cfg)
             return name, entity_cfg, df, actual_rows, target_rows
 
-        while remaining:
-            # Pick all entities whose deps are satisfied
-            wave = [e for e in remaining if _deps(e).issubset(done_names)]
-            if not wave:
-                # Circular dep or something unexpected – fall back to sequential
-                wave = [remaining[0]]
-
-            for e in wave:
-                remaining.remove(e)
-
-            if len(wave) == 1:
-                # No parallelism needed for a single entity
-                name, entity_cfg, df, actual_rows, target_rows = _process_entity(wave[0])
-                pk_col = next((c["name"] for c in entity_cfg["columns"] if c.get("primary_key")), None)
-                self.build_fk_cache(name, df, pk_col, fk_cache, max_cache=fk_max_cache)
-                self.summary["database_tables"][name] = {
-                    "target_rows": target_rows,
-                    "actual_rows": actual_rows if actual_rows > 0 else len(df),
-                }
-                self.summary["total_records"] += len(df)
-                done_names.add(name)
-                del df
-            else:
-                # Parallel wave
-                max_workers = min(len(wave), 4)   # cap at 4 concurrent DB conns
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {pool.submit(_process_entity, e): e for e in wave}  # type: ignore[arg-type]
-                    for fut in as_completed(futures):
-                        name, entity_cfg, df, actual_rows, target_rows = fut.result()
-                        pk_col = next((c["name"] for c in entity_cfg["columns"] if c.get("primary_key")), None)
-                        self.build_fk_cache(name, df, pk_col, fk_cache, max_cache=fk_max_cache)
-                        self.summary["database_tables"][name] = {
-                            "target_rows": target_rows,
-                            "actual_rows": actual_rows if actual_rows > 0 else len(df),
-                        }
-                        self.summary["total_records"] += len(df)
-                        done_names.add(name)
-                        del df
-
-        self.generate_files()
-        self.generate_api_dump()
-
-        # ── Daily generation: loop day-by-day ──────────────────────────────
+        # ── Daily generation ───────────────────────────────────────────────
         if self.generate_days >= 0:
             self._run_daily_generation(fk_cache, global_mess)
+        else:
+            # ── Normal Generation ──────────────────────────────────────────────
+            while remaining:
+                # Pick all entities whose deps are satisfied
+                wave = [e for e in remaining if _deps(e).issubset(done_names)]
+                if not wave:
+                    # Circular dep or something unexpected – fall back to sequential
+                    wave = [remaining[0]]
+
+                for e in wave:
+                    remaining.remove(e)
+
+                if len(wave) == 1:
+                    # No parallelism needed for a single entity
+                    name, entity_cfg, df, actual_rows, target_rows = _process_entity(wave[0])
+                    pk_col = next((c["name"] for c in entity_cfg["columns"] if c.get("primary_key")), None)
+                    self.build_fk_cache(name, df, pk_col, fk_cache, max_cache=fk_max_cache)
+                    self.summary["database_tables"][name] = {
+                        "target_rows": target_rows,
+                        "actual_rows": actual_rows if actual_rows > 0 else len(df),
+                    }
+                    self.summary["total_records"] += len(df)
+                    done_names.add(name)
+                    del df
+                else:
+                    # Parallel wave
+                    max_workers = min(len(wave), 4)   # cap at 4 concurrent DB conns
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        futures = {pool.submit(_process_entity, e): e for e in wave}  # type: ignore[arg-type]
+                        for fut in as_completed(futures):
+                            name, entity_cfg, df, actual_rows, target_rows = fut.result()
+                            pk_col = next((c["name"] for c in entity_cfg["columns"] if c.get("primary_key")), None)
+                            self.build_fk_cache(name, df, pk_col, fk_cache, max_cache=fk_max_cache)
+                            self.summary["database_tables"][name] = {
+                                "target_rows": target_rows,
+                                "actual_rows": actual_rows if actual_rows > 0 else len(df),
+                            }
+                            self.summary["total_records"] += len(df)
+                            done_names.add(name)
+                            del df
+
+            self.generate_files()
+            self.generate_api_dump()
 
         self.summary["execution_seconds"] = math.floor(float(time.time() - self.start_time) * 100) / 100.0
 
@@ -864,7 +865,7 @@ class DataGenerator:
     # ------------------------------------------------------------------
     def _run_daily_generation(self, fk_cache: Dict[str, np.ndarray],
                                global_mess: Dict) -> None:
-        """Generate rows for each of the next `self.generate_days` days.
+        """Generate rows for the specific day `self.generate_days`.
 
         Each day iteration:
           1. Shifts the temporal window to [day_start, day_end)
@@ -893,14 +894,14 @@ class DataGenerator:
             orig_api_records[api_cfg["name"]] = api_cfg["total_records"]
 
         print(f"\n{'='*60}")
-        print(f"  Daily generation: day 0 to {self.generate_days} × {self.rows_per_day} rows/day")
+        print(f"  Day-specific generation: day {self.generate_days} × {self.rows_per_day} rows")
         print(f"{'='*60}")
 
-        for day_offset in range(0, self.generate_days + 1):
+        for day_offset in [self.generate_days]:
             day_start = today + timedelta(days=day_offset)
             day_end   = day_start + timedelta(days=1)
 
-            print(f"\n  ── Day {day_offset}/{self.generate_days}: {day_start.strftime('%Y-%m-%d')} ──")
+            print(f"\n  ── Day {day_offset}: {day_start.strftime('%Y-%m-%d')} ──")
 
             # Shift the temporal window to this specific day
             self.schema["temporal"]["start_date"] = day_start.strftime("%Y-%m-%d")
@@ -956,5 +957,5 @@ class DataGenerator:
             api_cfg["total_records"] = orig_api_records.get(api_cfg["name"], api_cfg["total_records"])
 
         print(f"\n{'='*60}")
-        print(f"  Daily generation complete!")
+        print(f"  Day-specific generation complete!")
         print(f"{'='*60}\n")

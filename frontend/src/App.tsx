@@ -616,8 +616,8 @@ export default function App() {
                                                         onChange={(e) => setIncrementDay(e.target.value)}
                                                         placeholder="0"
                                                         className={`w-24 px-3 py-2 text-sm border rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none bg-white text-center font-semibold transition-colors ${incrementDay !== '' && !isIncrementDayValid
-                                                                ? 'border-red-400 bg-red-50'
-                                                                : 'border-blue-300'
+                                                            ? 'border-red-400 bg-red-50'
+                                                            : 'border-blue-300'
                                                             }`}
                                                     />
                                                     {incrementDay !== '' && !isIncrementDayValid && (
@@ -645,7 +645,7 @@ export default function App() {
                                             </div>
                                             {isIncrementReady && (
                                                 <div className="mt-3 text-xs text-blue-500 bg-blue-100/50 rounded-lg px-3 py-2">
-                                                    Will generate <strong>{incrementRows.toLocaleString()}</strong> rows per entity for <strong>{Number(incrementDay) === 0 ? 'today' : `day ${incrementDay}`}</strong>
+                                                    Will generate <strong>{incrementRows.toLocaleString()}</strong> rows per entity specifically for <strong>{Number(incrementDay) === 0 ? 'today' : `day ${incrementDay}`}</strong>
                                                 </div>
                                             )}
                                         </div>

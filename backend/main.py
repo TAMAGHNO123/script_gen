@@ -156,7 +156,7 @@ async def generate_incremental(request: Request):
 
 @app.post("/generate-daily")
 async def generate_daily(request: Request):
-    """Generate data day-by-day for the next N days, appending to an existing job's output."""
+    """Generate data for a specific day, appending to an existing job's output."""
     try:
         body_bytes = await request.body()
         body_dict = json.loads(body_bytes)
