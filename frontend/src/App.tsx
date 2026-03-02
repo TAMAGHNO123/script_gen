@@ -55,7 +55,7 @@ export default function App() {
 
     // Connection String State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [connectionString, setConnectionString] = useState('');
+    const [connectionString, setConnectionString] = useState(() => localStorage.getItem('db_connection_string') || '');
     const [testDbStatus, setTestDbStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
     const [testDbMessage, setTestDbMessage] = useState('');
 
@@ -65,7 +65,8 @@ export default function App() {
     const [showValidationDetails, setShowValidationDetails] = useState(true);
 
     // Incremental Data Generation State
-    const [incrementTargetDate, setIncrementTargetDate] = useState<string>('');
+    const [targetDateStart, setTargetDateStart] = useState<string>('');
+    const [targetDateEnd, setTargetDateEnd] = useState<string>('');
     const [incrementRows, setIncrementRows] = useState(10);
 
     const pollStatus = useCallback(async (currentJobId: string) => {
@@ -182,23 +183,22 @@ export default function App() {
     };
 
     const getDaysDifference = () => {
-        if (!incrementTargetDate) return -1;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const target = new Date(incrementTargetDate);
-        target.setHours(0, 0, 0, 0);
-        const diffTime = target.getTime() - today.getTime();
+        if (!targetDateStart || !targetDateEnd) return -1;
+        const start = new Date(targetDateStart);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(targetDateEnd);
+        end.setHours(0, 0, 0, 0);
+        const diffTime = end.getTime() - start.getTime();
         return Math.floor(diffTime / (1000 * 60 * 60 * 24));
     };
 
     const daysDiff = getDaysDifference();
-    const isIncrementTargetDateValid = incrementTargetDate !== '' && daysDiff >= 1 && daysDiff <= 365;
-    const isIncrementReady = isIncrementTargetDateValid && incrementRows >= 1;
+    const isDateRangeValid = targetDateStart !== '' && targetDateEnd !== '' && daysDiff >= 0 && daysDiff <= 365;
+    const isIncrementReady = isDateRangeValid && incrementRows >= 1;
 
     const handleIncrementalGeneration = async () => {
         if (!jobId || status !== 'completed' || !isIncrementReady) return;
         const baseId = jobId;
-        const dayValue = daysDiff;
         try {
             setStatus('running');
             setError(null);
@@ -207,7 +207,8 @@ export default function App() {
                 schema: schemaText,
                 connection_string: connectionString || undefined,
                 base_job_id: baseId,
-                generate_days: dayValue,
+                target_date_start: targetDateStart,
+                target_date_end: targetDateEnd,
                 rows_per_day: incrementRows,
             };
 
@@ -332,7 +333,10 @@ export default function App() {
                                         Neon DB Template (?sslmode=require)
                                     </button>
                                     <button
-                                        onClick={() => setConnectionString('')}
+                                        onClick={() => {
+                                            localStorage.removeItem('db_connection_string');
+                                            setConnectionString('');
+                                        }}
                                         className="text-xs px-3 py-1 bg-red-50 text-red-600 rounded hover:bg-red-100 transition-colors ml-auto"
                                     >
                                         Clear Override
@@ -354,7 +358,14 @@ export default function App() {
                                             Test Connection
                                         </button>
                                         <button
-                                            onClick={() => setIsSettingsOpen(false)}
+                                            onClick={() => {
+                                                if (connectionString) {
+                                                    localStorage.setItem('db_connection_string', connectionString);
+                                                } else {
+                                                    localStorage.removeItem('db_connection_string');
+                                                }
+                                                setIsSettingsOpen(false);
+                                            }}
                                             className="px-4 py-2 text-sm font-bold text-white bg-slate-800 rounded-lg hover:bg-slate-900 transition-colors"
                                         >
                                             Save & Close
@@ -613,24 +624,36 @@ export default function App() {
                                         {/* Incremental Data Generation Section */}
                                         <div className="p-5 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-200 shadow-sm">
                                             <div className="mb-3">
-                                                <p className="text-sm font-semibold text-blue-700 uppercase tracking-wider mb-1">Incremental Data</p>
-                                                <p className="text-xs text-blue-600">Generate rows from tomorrow up to the selected date (max +365 days)</p>
+                                                <p className="text-sm font-semibold text-blue-700 uppercase tracking-wider mb-1">Date Range Generation</p>
+                                                <p className="text-xs text-blue-600">Generate rows chronologically across a specific date window (max span 365 days)</p>
                                             </div>
                                             <div className="flex items-end gap-4 flex-wrap">
                                                 <div className="flex flex-col gap-1">
-                                                    <label className="text-xs font-medium text-blue-700">Target Date</label>
+                                                    <label className="text-xs font-medium text-blue-700">Start Date</label>
                                                     <input
                                                         type="date"
-                                                        value={incrementTargetDate}
-                                                        onChange={(e) => setIncrementTargetDate(e.target.value)}
-                                                        min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
-                                                        className={`px-3 py-2 text-sm border rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none bg-white font-semibold transition-colors ${incrementTargetDate !== '' && !isIncrementTargetDateValid
+                                                        value={targetDateStart}
+                                                        onChange={(e) => setTargetDateStart(e.target.value)}
+                                                        className={`px-3 py-2 text-sm border rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none bg-white font-semibold transition-colors ${targetDateStart !== '' && !isDateRangeValid && targetDateEnd !== ''
                                                             ? 'border-red-400 bg-red-50'
                                                             : 'border-blue-300'
                                                             }`}
                                                     />
-                                                    {incrementTargetDate !== '' && !isIncrementTargetDateValid && (
-                                                        <span className="text-[10px] text-red-500">Invalid future date</span>
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="text-xs font-medium text-blue-700">End Date</label>
+                                                    <input
+                                                        type="date"
+                                                        value={targetDateEnd}
+                                                        onChange={(e) => setTargetDateEnd(e.target.value)}
+                                                        min={targetDateStart}
+                                                        className={`px-3 py-2 text-sm border rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none bg-white font-semibold transition-colors ${targetDateEnd !== '' && !isDateRangeValid && targetDateStart !== ''
+                                                            ? 'border-red-400 bg-red-50'
+                                                            : 'border-blue-300'
+                                                            }`}
+                                                    />
+                                                    {targetDateStart !== '' && targetDateEnd !== '' && !isDateRangeValid && (
+                                                        <span className="text-[10px] text-red-500">Invalid range</span>
                                                     )}
                                                 </div>
                                                 <div className="flex flex-col gap-1">
@@ -654,7 +677,7 @@ export default function App() {
                                             </div>
                                             {isIncrementReady && (
                                                 <div className="mt-3 text-xs text-blue-500 bg-blue-100/50 rounded-lg px-3 py-2">
-                                                    Will generate <strong>{incrementRows.toLocaleString()}</strong> rows per day for <strong>{daysDiff}</strong> days ({(daysDiff * incrementRows).toLocaleString()} total rows per entity), from tomorrow to {incrementTargetDate}
+                                                    Will generate <strong>{incrementRows.toLocaleString()}</strong> rows per day for <strong>{daysDiff + 1}</strong> days ({((daysDiff + 1) * incrementRows).toLocaleString()} total rows per entity), from {targetDateStart} to {targetDateEnd}
                                                 </div>
                                             )}
                                         </div>

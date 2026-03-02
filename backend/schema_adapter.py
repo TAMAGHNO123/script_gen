@@ -39,16 +39,24 @@ def adapt_schema(raw: Dict[str, Any]) -> Dict[str, Any]:
         "version": str(raw.get("version", "1.0.0")),
     }
 
-    # ── temporal ──────────────────────────────────────────────────────────
     gs = raw.get("global_settings", {})
-    tr = gs.get("temporal_range", ["2023-01-01", "2024-12-31"])
-    out["temporal"] = {
-        "start_date": str(tr[0]),
-        "end_date":   str(tr[1]),
-    }
+
+    # ── temporal ──────────────────────────────────────────────────────────
+    if "temporal" in raw and isinstance(raw["temporal"], dict):
+        out["temporal"] = {
+            "start_date": str(raw["temporal"].get("start_date", "2023-01-01")),
+            "end_date":   str(raw["temporal"].get("end_date", "2024-12-31")),
+        }
+    else:
+        tr = gs.get("temporal_range", ["2023-01-01", "2024-12-31"])
+        out["temporal"] = {
+            "start_date": str(tr[0]),
+            "end_date":   str(tr[1]),
+        }
 
     # ── fk_cache ──────────────────────────────────────────────────────────
-    out["fk_cache"] = {"enabled": bool(gs.get("fk_cache_enabled", True))}
+    fk_cache_val = gs.get("fk_cache", gs.get("fk_cache_enabled", True))
+    out["fk_cache"] = {"enabled": bool(fk_cache_val)}
 
     # ── global_messiness ──────────────────────────────────────────────────
     # Allow a top-level global_messiness block in the user schema too

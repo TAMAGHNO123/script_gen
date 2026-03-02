@@ -100,7 +100,8 @@ def _fill_pattern(pattern: str) -> str:
 class DataGenerator:
     def __init__(self, schema: Dict, output_dir: str = "output", connection_string: Optional[str] = None,
                  incremental: bool = False, incremental_rows: int = 0,
-                 generate_days: int = 0, rows_per_day: int = 10):
+                 target_date_start: Optional[str] = None, target_date_end: Optional[str] = None,
+                 rows_per_day: int = 10):
         import importlib, sys, os as _os
         _backend_dir = _os.path.dirname(_os.path.abspath(__file__))
         if _backend_dir not in sys.path:
@@ -111,7 +112,8 @@ class DataGenerator:
         self.output_dir = Path(output_dir)
         self.incremental = incremental
         self.incremental_rows = incremental_rows
-        self.generate_days = generate_days
+        self.target_date_start = target_date_start
+        self.target_date_end = target_date_end
         self.rows_per_day = max(rows_per_day, 1)  # enforce minimum 1
         self.start_time = time.time()
         self.summary: Dict[str, Any] = {
@@ -119,8 +121,9 @@ class DataGenerator:
             "schema_version": schema.get("version", "unknown"),
             "incremental": incremental,
             "incremental_rows": incremental_rows if incremental else 0,
-            "generate_days": generate_days,
-            "rows_per_day": rows_per_day if generate_days >= 0 else 0,
+            "target_date_start": target_date_start,
+            "target_date_end": target_date_end,
+            "rows_per_day": rows_per_day if (target_date_start and target_date_end) else 0,
             "database_tables": {},
             "files_generated": [],
             "api_dumps_generated": [],
@@ -132,10 +135,14 @@ class DataGenerator:
         np.random.seed(42)
         random.seed(42)
         
-        # Override the schema's temporal config to ALWAYS rely on the latest date (today) by default
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        schema["temporal"]["start_date"] = today.strftime("%Y-%m-%d")
-        schema["temporal"]["end_date"] = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Override the schema's temporal config based on input
+        if self.target_date_start and self.target_date_end:
+            schema["temporal"]["start_date"] = self.target_date_start
+            schema["temporal"]["end_date"] = self.target_date_end
+        elif not schema.get("temporal", {}).get("start_date"):
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            schema["temporal"]["start_date"] = today.strftime("%Y-%m-%d")
+            schema["temporal"]["end_date"] = (today + timedelta(days=1)).strftime("%Y-%m-%d")
         
         # Let's make api_dumps and file_sources optional by providing default empty lists if missing.
         if "api_dumps" not in self.schema:
@@ -446,11 +453,10 @@ class DataGenerator:
             cur.execute("SET work_mem = '256MB';")
             conn.commit()
 
-            # ── create table (skip in incremental mode) ───────────────────
-            if not self.incremental:
-                create_sql = self._build_create_table_sql(entity_cfg)
-                cur.execute(create_sql)
-                conn.commit()
+            # ── create table ───────────────────
+            create_sql = self._build_create_table_sql(entity_cfg)
+            cur.execute(create_sql)
+            conn.commit()
 
             cols        = list(df.columns)
             quoted_cols = [f'"{ c}"' for c in cols]
@@ -534,9 +540,23 @@ class DataGenerator:
                 pattern = file_cfg["filename_pattern"]
                 filename = pattern.format(date=date_str, week=i + 1)
                 filepath = out_dir / filename
+                
+                # If we are appending (either incremental or multi-day loop), 
+                # avoid creating new files with new dates. Append to the existing file.
+                if out_dir.exists():
+                    ext = {"excel": "xlsx"}.get(fmt, fmt)
+                    existing_files = sorted(list(out_dir.glob(f"*.{ext}")))
+                    if existing_files:
+                        if i < len(existing_files):
+                            filepath = existing_files[i]
+                        else:
+                            filepath = existing_files[-1]
+                
                 filepath.parent.mkdir(parents=True, exist_ok=True)
 
                 local_mess = file_cfg.get("messiness", {})
+                new_rows_count = len(df)
+                final_rows = new_rows_count
 
                 if fmt == "csv":
                     header = True
@@ -552,9 +572,11 @@ class DataGenerator:
                             c = random.choice(date_cols)
                             fmt_str = random.choice(["%d/%m/%Y", "%m-%d-%Y", "%Y%m%d"])
                             df[c] = df[c].dt.strftime(fmt_str)
-                    # Incremental: append to existing CSV
-                    if self.incremental and filepath.exists():
+                    # Append to existing CSV if it exists
+                    if filepath.exists():
                         df.to_csv(filepath, mode='a', index=False, header=False)
+                        with open(filepath, 'rb') as f_count:
+                            final_rows = sum(1 for _ in f_count) - (1 if header else 0)
                     else:
                         df.to_csv(filepath, index=False, header=header)
                 elif fmt == "excel":
@@ -567,10 +589,11 @@ class DataGenerator:
                             summary_row[df.columns[0]] = "Total"
                         df = pd.concat([df, pd.DataFrame([summary_row])], ignore_index=True)
                     sheet = file_cfg.get("sheet_name", "Sheet1")
-                    # Incremental: read existing Excel and append new rows
-                    if self.incremental and filepath.exists():
+                    # Append to existing Excel if it exists
+                    if filepath.exists():
                         existing_df = pd.read_excel(filepath, sheet_name=sheet, engine="openpyxl")
                         df = pd.concat([existing_df, df], ignore_index=True)
+                        final_rows = len(df)
                     if local_mess.get("multi_sheet_split", False) and len(df) > 2:
                         split_idx = len(df) // 2
                         df1 = df.iloc[:split_idx]
@@ -580,6 +603,8 @@ class DataGenerator:
                             df2.to_excel(writer, index=False, sheet_name=f"{sheet}_2")
                     else:
                         df.to_excel(filepath, index=False, sheet_name=sheet, engine="openpyxl")
+                    if final_rows == new_rows_count:
+                        final_rows = len(df)
                 elif fmt == "parquet":
                     if not PYARROW_AVAILABLE: continue
                     if local_mess.get("schema_evolution", False) and np.random.random() < 0.2:
@@ -588,13 +613,16 @@ class DataGenerator:
                             drop_c = random.choice(drop_candidates)
                             if drop_c in df.columns:
                                 df = df.drop(columns=[drop_c])
-                    # Incremental: read existing parquet and append new rows
-                    if self.incremental and filepath.exists():
+                    # Append to existing parquet if it exists
+                    if filepath.exists():
                         existing_table = pq.read_table(str(filepath))
                         existing_df = existing_table.to_pandas()
                         df = pd.concat([existing_df, df], ignore_index=True)
+                        final_rows = len(df)
                     table_pa = pa.Table.from_pandas(df, preserve_index=False)
                     pq.write_table(table_pa, str(filepath))
+                    if final_rows == new_rows_count:
+                        final_rows = len(df)
                 elif fmt == "json":
                     for col in df.select_dtypes(include=['datetime']).columns:
                         df[col] = df[col].astype(str)
@@ -612,24 +640,33 @@ class DataGenerator:
                                 keys_to_del = [k for k, v in rec.items() if pd.isna(v) or v is None or v == "NaT"]
                                 for k in keys_to_del:
                                     rec.pop(k, None)
-                    # Incremental: read existing JSON array and extend
-                    if self.incremental and filepath.exists():
+                    # Append to existing JSON array if it exists
+                    if filepath.exists():
                         with open(filepath, "r", encoding="utf-8") as fr:
                             existing_records = json.load(fr)
                         if isinstance(existing_records, list):
                             records = existing_records + records
+                    final_rows = len(records)
                     with open(filepath, "w", encoding="utf-8") as f:
                         json.dump(records, f, indent=2, default=str)
 
                 size_kb = float(filepath.stat().st_size) / 1024.0
-                self.summary["files_generated"].append({
+                file_entry = {
                     "entity": name,
                     "format": fmt,
                     "filename": str(filepath),
-                    "rows": len(df),
+                    "rows": final_rows,
                     "size_kb": math.floor(size_kb * 10) / 10.0,
-                })
-                self.summary["total_records"] += len(df)
+                }
+                
+                # Update existing summary or append if new (prevents dupes in multi-day runs)
+                existing_idx = next((j for j, f in enumerate(self.summary["files_generated"]) if f["filename"] == str(filepath)), -1)
+                if existing_idx >= 0:
+                    self.summary["files_generated"][existing_idx] = file_entry
+                else:
+                    self.summary["files_generated"].append(file_entry)
+                    
+                self.summary["total_records"] += new_rows_count
 
     def generate_api_dump(self) -> None:
         for api_cfg in self.schema.get("api_dumps", []):
@@ -643,18 +680,17 @@ class DataGenerator:
             global_mess = self.schema.get("global_messiness", {})
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # ── Collect existing records when in incremental mode ──────────
+            # ── Collect existing records when appending ──────────
             existing_records: List[Dict[str, Any]] = []
-            if self.incremental:
-                page_num = 1
-                while True:
-                    existing_path = out_dir / pattern.format(page=page_num)
-                    if not existing_path.exists():
-                        break
-                    with open(existing_path, "r", encoding="utf-8") as fr:
-                        page_data = json.load(fr)
-                    existing_records.extend(page_data.get("data", []))
-                    page_num += 1
+            page_num = 1
+            while True:
+                existing_path = out_dir / pattern.format(page=page_num)
+                if not existing_path.exists():
+                    break
+                with open(existing_path, "r", encoding="utf-8") as fr:
+                    page_data = json.load(fr)
+                existing_records.extend(page_data.get("data", []))
+                page_num += 1
 
             # ── Generate new records ───────────────────────────────────────
             new_records: List[Dict[str, Any]] = []
@@ -726,12 +762,19 @@ class DataGenerator:
                     json.dump(payload, f, default=str, indent=2)
 
             total_size_kb = float(sum(f.stat().st_size for f in out_dir.glob("*.json"))) / 1024.0
-            self.summary["api_dumps_generated"].append({
+            api_entry = {
                 "name":       name,
                 "pages":      n_pages,
                 "records":    total,
                 "size_kb":    math.floor(total_size_kb * 10) / 10.0,
-            })
+            }
+            
+            existing_idx = next((j for j, a in enumerate(self.summary["api_dumps_generated"]) if a["name"] == name), -1)
+            if existing_idx >= 0:
+                self.summary["api_dumps_generated"][existing_idx] = api_entry
+            else:
+                self.summary["api_dumps_generated"].append(api_entry)
+                
             self.summary["total_records"] += total
 
     def _topological_sort(self, entities: List[Dict]) -> List[Dict]:
@@ -813,9 +856,17 @@ class DataGenerator:
             actual_rows = self.load_postgres(df, entity_cfg)
             return name, entity_cfg, df, actual_rows, target_rows
 
-        # ── Daily generation ───────────────────────────────────────────────
-        if self.generate_days > 0:
-            self._run_daily_generation(fk_cache, global_mess)
+        # ── Date Range Generation ───────────────────────────────────────────────
+        schema_start = self.schema.get("temporal", {}).get("start_date")
+        schema_end = self.schema.get("temporal", {}).get("end_date")
+        
+        has_explicit = bool(self.target_date_start and self.target_date_end)
+        use_start = self.target_date_start if has_explicit else schema_start
+        use_end = self.target_date_end if has_explicit else schema_end
+        override_rows = self.rows_per_day if has_explicit else None
+
+        if use_start and use_end and use_start <= use_end:
+            self._run_date_range_generation(fk_cache, global_mess, use_start, use_end, override_rows)
         else:
             # ── Normal Generation ──────────────────────────────────────────────
             while remaining:
@@ -870,21 +921,23 @@ class DataGenerator:
         return self.summary
 
     # ------------------------------------------------------------------
-    # Daily generation: produce data for each of the next N days
+    # Date range generation: produce data chronologically for a window
     # ------------------------------------------------------------------
-    def _run_daily_generation(self, fk_cache: Dict[str, np.ndarray],
-                               global_mess: Dict) -> None:
-        """Generate rows for the specific day `self.generate_days`.
+    def _run_date_range_generation(self, fk_cache: Dict[str, np.ndarray],
+                                   global_mess: Dict, target_start: str, target_end: str, override_rows: Optional[int] = None) -> None:
+        """Generate rows for each day between target_start and target_end.
 
         Each day iteration:
           1. Shifts the temporal window to [day_start, day_end)
-          2. Overrides row_count with self.rows_per_day
-          3. Generates entities & appends to DB (incremental mode)
-          4. Generates files & API dumps with incremental append
+          2. Generates entities & appends to DB (incremental mode)
+          3. Generates files & API dumps with incremental append
         """
         from copy import deepcopy
+        from datetime import datetime, timedelta
 
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = datetime.strptime(target_start, "%Y-%m-%d")
+        end_dt = datetime.strptime(target_end, "%Y-%m-%d")
+        days_diff = max(0, (end_dt - start_dt).days)
         db_entities_cfg = self.schema.get("database", {}).get("entities", [])
 
         # Save original values so we can restore after each day
@@ -903,27 +956,35 @@ class DataGenerator:
             orig_api_records[api_cfg["name"]] = api_cfg["total_records"]
 
         print(f"\n{'='*60}")
-        print(f"  Day-specific generation: day {self.generate_days} × {self.rows_per_day} rows")
+        label = f"× {override_rows} rows/day" if override_rows is not None else "(using schema volumes/day)"
+        print(f"  Date-range generation: {target_start} to {target_end} {label}")
         print(f"{'='*60}")
 
-        for day_offset in range(1, self.generate_days + 1):
-            day_start = today + timedelta(days=day_offset)
+        for day_offset in range(days_diff + 1):
+            day_start = start_dt + timedelta(days=day_offset)
             day_end   = day_start + timedelta(days=1)
 
-            print(f"\n  ── Day {day_offset}: {day_start.strftime('%Y-%m-%d')} ──")
+            print(f"\n  ── Day {day_offset+1}: {day_start.strftime('%Y-%m-%d')} ──")
 
             # Shift the temporal window to this specific day
             self.schema["temporal"]["start_date"] = day_start.strftime("%Y-%m-%d")
             self.schema["temporal"]["end_date"]   = day_end.strftime("%Y-%m-%d")
 
-            # Override row counts
-            for entity in db_entities_cfg:
-                entity["row_count"] = self.rows_per_day
-            for file_cfg in self.schema.get("file_sources", []):
-                file_cfg["rows_per_file"] = self.rows_per_day
-                file_cfg["num_files"] = 1
-            for api_cfg in self.schema.get("api_dumps", []):
-                api_cfg["total_records"] = self.rows_per_day
+            # Override row counts if requested
+            if override_rows is not None:
+                for entity in db_entities_cfg:
+                    entity["row_count"] = override_rows
+                for file_cfg in self.schema.get("file_sources", []):
+                    file_cfg["rows_per_file"] = override_rows
+                for api_cfg in self.schema.get("api_dumps", []):
+                    api_cfg["total_records"] = override_rows
+            else:
+                for entity in db_entities_cfg:
+                    entity["row_count"] = orig_row_counts.get(entity["name"], entity["row_count"])
+                for file_cfg in self.schema.get("file_sources", []):
+                    file_cfg["rows_per_file"] = orig_file_rows.get(file_cfg["name"], file_cfg["rows_per_file"])
+                for api_cfg in self.schema.get("api_dumps", []):
+                    api_cfg["total_records"] = orig_api_records.get(api_cfg["name"], api_cfg["total_records"])
 
             # Force incremental mode for appending
             self.incremental = True
@@ -946,7 +1007,7 @@ class DataGenerator:
                     self.summary["database_tables"][name]["actual_rows"] += len(df)
                 else:
                     self.summary["database_tables"][name] = {
-                        "target_rows": self.rows_per_day,
+                        "target_rows": override_rows if override_rows is not None else orig_row_counts.get(name, 0),
                         "actual_rows": actual_rows if actual_rows > 0 else len(df),
                     }
                 self.summary["total_records"] += len(df)
@@ -962,9 +1023,7 @@ class DataGenerator:
         for entity in db_entities_cfg:
             entity["row_count"] = orig_row_counts.get(entity["name"], entity["row_count"])
         for file_cfg in self.schema.get("file_sources", []):
-            file_cfg["rows_per_file"] = orig_file_rows.get(file_cfg["name"], file_cfg["rows_per_file"])
-            if "num_files" in file_cfg:
-                file_cfg["num_files"] = self.schema.get("file_sources", [])[0].get("num_files", file_cfg["num_files"]) # restore is hacky, but realistically we only need this for the current run
+                file_cfg["rows_per_file"] = orig_file_rows.get(file_cfg["name"], file_cfg["rows_per_file"])
         for api_cfg in self.schema.get("api_dumps", []):
             api_cfg["total_records"] = orig_api_records.get(api_cfg["name"], api_cfg["total_records"])
 

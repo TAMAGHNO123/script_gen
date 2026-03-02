@@ -11,7 +11,9 @@ from typing import Optional
 def run_job_sync(job_id: str, schema: dict, connection_string: Optional[str] = None,
                  incremental: bool = False, incremental_rows: int = 0,
                  base_job_id: Optional[str] = None,
-                 generate_days: int = -1, rows_per_day: int = 10):
+                 target_date_start: Optional[str] = None,
+                 target_date_end: Optional[str] = None,
+                 rows_per_day: int = 10):
     try:
         jobs[job_id]["status"] = "running"
         # In incremental / daily mode, reuse the base job's output directory
@@ -22,7 +24,8 @@ def run_job_sync(job_id: str, schema: dict, connection_string: Optional[str] = N
             connection_string=connection_string,
             incremental=incremental,
             incremental_rows=incremental_rows,
-            generate_days=generate_days,
+            target_date_start=target_date_start,
+            target_date_end=target_date_end,
             rows_per_day=rows_per_day,
         )
         summary = generator.run()
@@ -39,7 +42,9 @@ def run_job_sync(job_id: str, schema: dict, connection_string: Optional[str] = N
 def start_job(schema: dict, connection_string: Optional[str] = None,
               incremental: bool = False, incremental_rows: int = 0,
               base_job_id: Optional[str] = None,
-              generate_days: int = -1, rows_per_day: int = 10) -> str:
+              target_date_start: Optional[str] = None,
+              target_date_end: Optional[str] = None,
+              rows_per_day: int = 10) -> str:
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending", "result": None, "error": None}
     
@@ -48,7 +53,7 @@ def start_job(schema: dict, connection_string: Optional[str] = None,
     loop.run_in_executor(
         executor, run_job_sync, job_id, schema, connection_string,
         incremental, incremental_rows, base_job_id,
-        generate_days, rows_per_day,
+        target_date_start, target_date_end, rows_per_day,
     )
     
     return job_id

@@ -175,15 +175,16 @@ async def generate_daily(request: Request):
     schema_str = body_dict.get("schema")
     connection_string = body_dict.get("connection_string")
     base_job_id = body_dict.get("base_job_id")
-    generate_days = body_dict.get("generate_days", 30)
+    target_date_start = body_dict.get("target_date_start")
+    target_date_end = body_dict.get("target_date_end")
     rows_per_day = body_dict.get("rows_per_day", 10)
 
     if not schema_str:
         raise HTTPException(status_code=400, detail="Missing 'schema' in payload")
     if not base_job_id:
         raise HTTPException(status_code=400, detail="Missing 'base_job_id' in payload")
-    if not isinstance(generate_days, int) or generate_days < 0 or generate_days > 365:
-        raise HTTPException(status_code=400, detail="'generate_days' must be an integer between 0 and 365")
+    if not target_date_start or not target_date_end:
+        raise HTTPException(status_code=400, detail="Missing 'target_date_start' or 'target_date_end' in payload")
     if not isinstance(rows_per_day, int) or rows_per_day < 1:
         raise HTTPException(status_code=400, detail="'rows_per_day' must be an integer >= 1")
 
@@ -210,13 +211,15 @@ async def generate_daily(request: Request):
     job_id = start_job(
         schema_dict, connection_string,
         base_job_id=base_job_id,
-        generate_days=generate_days,
+        target_date_start=target_date_start,
+        target_date_end=target_date_end,
         rows_per_day=rows_per_day,
     )
     return {
         "job_id": job_id,
         "base_job_id": base_job_id,
-        "generate_days": generate_days,
+        "target_date_start": target_date_start,
+        "target_date_end": target_date_end,
         "rows_per_day": rows_per_day,
         "status": "pending",
     }
