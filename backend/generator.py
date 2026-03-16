@@ -3,6 +3,7 @@ import math
 import os
 import random
 import string
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -131,9 +132,17 @@ class DataGenerator:
             "execution_seconds": 0,
         }
         self.fake = Faker()
-        Faker.seed(42)
-        np.random.seed(42)
-        random.seed(42)
+        self._db_lock = threading.Lock()
+        
+        # Use a stable seed for standard runs, but dynamic for incremental/date-range
+        if self.incremental or (self.target_date_start and self.target_date_end):
+            seed = int(time.time() * 1000) % 2**32
+        else:
+            seed = 42
+            
+        Faker.seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
         
         # Override the schema's temporal config based on input
         if self.target_date_start and self.target_date_end:
@@ -234,6 +243,11 @@ class DataGenerator:
 
         if ct == "integer":
             lo, hi = col_def.get("min", 0), col_def.get("max", 1000)
+            if is_pk:
+                # Ensure uniqueness if range allows, else fall back to randint
+                pop_size = hi - lo + 1
+                if pop_size >= n:
+                    return pd.Series(np.random.choice(np.arange(lo, hi + 1), size=n, replace=False), dtype="Int64")
             return pd.Series(np.random.randint(lo, hi + 1, size=n), dtype="Int64")
 
         if ct == "float":
@@ -241,6 +255,10 @@ class DataGenerator:
             prec     = col_def.get("precision", 2)
             raw      = np.random.uniform(lo, hi, size=n)
             return pd.Series(np.round(raw, prec))
+        
+        if ct == "uuid" and is_pk:
+            # Bypass pooling for UUID primary keys to ensure global uniqueness
+            return pd.Series([str(self.fake.uuid4()) for _ in range(n)], dtype=object)
 
         pool = _make_pool(self.fake, ct, col_def, n_pool=min(POOL_SIZE, n + 1))
         idx  = np.random.randint(0, len(pool), size=n)
@@ -464,48 +482,49 @@ class DataGenerator:
         if not PSYCOPG2_AVAILABLE:
             return 0
 
-        CHUNK_ROWS = 200_000
-        table = entity_cfg["name"]
-        try:
-            conn = self._get_or_create_shared_conn()
-            if conn is None:
+        with self._db_lock:
+            CHUNK_ROWS = 200_000
+            table = entity_cfg["name"]
+            try:
+                conn = self._get_or_create_shared_conn()
+                if conn is None:
+                    return 0
+                cur = conn.cursor()
+
+                # ── create table ──────────────────────────────────────────────
+                create_sql = self._build_create_table_sql(entity_cfg)
+                cur.execute(create_sql)
+                conn.commit()
+
+                cols        = list(df.columns)
+                quoted_cols = [f'"{c}"' for c in cols]
+                cols_str    = ", ".join(quoted_cols)
+                copy_sql    = f'COPY "{table}" ({cols_str}) FROM STDIN WITH CSV NULL AS \'\\N\''
+
+                # ── stream in chunks ───────────────────────────────────────────
+                total_chunks = max(1, len(df) // CHUNK_ROWS + (1 if len(df) % CHUNK_ROWS else 0))
+                for chunk_i in range(total_chunks):
+                    chunk = df.iloc[chunk_i * CHUNK_ROWS : (chunk_i + 1) * CHUNK_ROWS]
+                    buf   = StringIO()
+                    chunk[cols].to_csv(buf, index=False, header=False, na_rep="\\N")
+                    buf.seek(0)
+                    cur.copy_expert(copy_sql, buf)
+                    del buf
+                conn.commit()
+
+                cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+                row = cur.fetchone()
+                db_count: int = int(row[0]) if row else 0
+
+                cur.close()
+                mode_label = "appended (incremental)" if self.incremental else "loaded"
+                print(f"  ✓ {table}: {db_count:,} rows {mode_label}")
+                return db_count
+            except Exception as e:
+                print(f"PostgreSQL load failed for '{table}': {e}")
+                # Force re-open next time
+                self._shared_pg_conn = None
                 return 0
-            cur = conn.cursor()
-
-            # ── create table ──────────────────────────────────────────────
-            create_sql = self._build_create_table_sql(entity_cfg)
-            cur.execute(create_sql)
-            conn.commit()
-
-            cols        = list(df.columns)
-            quoted_cols = [f'"{c}"' for c in cols]
-            cols_str    = ", ".join(quoted_cols)
-            copy_sql    = f'COPY "{table}" ({cols_str}) FROM STDIN WITH CSV NULL AS \'\\N\''
-
-            # ── stream in chunks ───────────────────────────────────────────
-            total_chunks = max(1, len(df) // CHUNK_ROWS + (1 if len(df) % CHUNK_ROWS else 0))
-            for chunk_i in range(total_chunks):
-                chunk = df.iloc[chunk_i * CHUNK_ROWS : (chunk_i + 1) * CHUNK_ROWS]
-                buf   = StringIO()
-                chunk[cols].to_csv(buf, index=False, header=False, na_rep="\\N")
-                buf.seek(0)
-                cur.copy_expert(copy_sql, buf)
-                del buf
-            conn.commit()
-
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
-            row = cur.fetchone()
-            db_count: int = int(row[0]) if row else 0
-
-            cur.close()
-            mode_label = "appended (incremental)" if self.incremental else "loaded"
-            print(f"  ✓ {table}: {db_count:,} rows {mode_label}")
-            return db_count
-        except Exception as e:
-            print(f"PostgreSQL load failed for '{table}': {e}")
-            # Force re-open next time
-            self._shared_pg_conn = None
-            return 0
 
     def _get_date_sequence(self, n_files: int, frequency: str) -> List[datetime]:
         start_dt, end_dt, _ = self._temporal_config()
